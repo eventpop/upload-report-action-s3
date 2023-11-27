@@ -1,0 +1,81 @@
+name: Upload report to S3
+description: Upload a directory containing HTML reports to S3
+inputs:
+  aws-role:
+    required: true
+    description: ARN of the AWS role to assume. e.g. arn:aws:iam::000000000000:role/github-action-role
+  aws-region:
+    required: true
+    description: Name of the AWS region to use. e.g. ap-southeast-1
+  s3-bucket:
+    required: true
+    description: Name of the S3 bucket to upload to.
+  view-url:
+    required: true
+    description: URL that corresponds to the S3 bucket WITHOUT the trailing slash. e.g. https://bucketname.s3.ap-southeast-1.amazonaws.com
+  name:
+    required: true
+    description: Name of the report, such as `playwright-report`. This will go into the URL, so make sure they are URL safe.
+  path:
+    required: true
+    description: Path to the report. There should be an `index.html` file inside it.
+runs:
+  using: "composite"
+  steps:
+    - uses: aws-actions/configure-aws-credentials@v1
+      with:
+        role-to-assume: ${{ inputs.aws-role }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Generate URLs
+      id: urls
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const name = process.env.PARAM_NAME
+          const s3Bucket = process.env.PARAM_S3_BUCKET
+          const viewUrl = process.env.PARAM_VIEW_URL
+          const id = require('crypto').randomUUID()
+          const sha = context.sha
+          const runId = context.runId
+          const dateTime = new Date().toISOString().replace(/:/g, '-').replace('T', '/').split('.')[0]
+          const s3Path = `${name}/${dateTime}/${runId}/${sha}/${id}`
+          const s3Url = `s3://${s3Bucket}/${s3Path}`
+          const htmlUrl = `${viewUrl}/${s3Path}/index.html`
+          core.setOutput('s3-url', s3Url)
+          core.setOutput('html-url', htmlUrl)
+      env:
+        PARAM_NAME: ${{ inputs.name }}
+        PARAM_S3_BUCKET: ${{ inputs.s3-bucket }}
+        PARAM_VIEW_URL: ${{ inputs.view-url }}
+
+    # For debugging / troubleshooting purpose
+    - name: Show current user
+      run: aws sts get-caller-identity
+      shell: bash
+
+    # Normally S3 CLI uploads 10 files at a time.
+    # This is too slow given the huge amount of files in the report.
+    # GOTTA GO FAST!
+    - name: Tune S3 CLI performance
+      run: |
+        aws configure set default.s3.max_concurrent_requests 200
+        aws configure set default.s3.max_queue_size 10000
+      shell: bash
+
+    - name: Upload files to S3
+      run: aws s3 sync ${{ inputs.path }} ${{ steps.urls.outputs.s3-url }}
+      shell: bash
+
+    - name: Generate job summary
+      uses: actions/github-script@v6
+      with:
+        script: |
+          console.log('Report URL:', process.env.PARAM_URL)
+          await core.summary
+            .addHeading('Report: ' + process.env.PARAM_NAME)
+            .addRaw(`\n[View report](${process.env.PARAM_URL})`)
+            .write()
+      env:
+        PARAM_NAME: ${{ inputs.name }}
+        PARAM_URL: ${{ steps.urls.outputs.html-url }}
